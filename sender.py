@@ -11,22 +11,31 @@ from playwright.sync_api import sync_playwright
 
 LOGIN_MARKERS = ("/login",)
 
-# 候选选择器（TikTok DOM 常变，多备几手）
+# 候选选择器（改编自已验证可用的开源项目 tiktok-streak-keeper 的 data-e2e 方案）
 MESSAGE_BTN_DATA = (
-    'button[data-e2e*="message" i]',
-    'button[data-e2e*="dm" i]',
-    '[data-e2e="user-bottom-bar"] button[role="button"]',
+    '[data-e2e="message-button"]',
+    'button:has-text("Message")',
+    'a[href*="/messages"]',
 )
 EDITOR_SELECTORS = (
+    '[data-e2e="message-input-area"] [contenteditable="true"]',
     '[data-e2e="chat-input"] [contenteditable="true"]',
-    '[contenteditable="true"]',
-    '.public-DraftEditor-content[contenteditable="true"]',
+    'div[contenteditable="true"]',
     'textarea[data-e2e="chat-input"]',
 )
 SEND_SELECTORS = (
+    '[data-e2e="message-send"]',
     '[data-e2e*="send" i]',
     'button[type="submit"]',
-    'div[data-e2e="chat-input-area"] button',
+)
+
+# TikTok 会弹出应用推广/通知弹层(.TUXModal-overlay)吞掉点击，需先关闭
+OVERLAY_SELECTOR = '.TUXModal-overlay'
+OVERLAY_CLOSE_SELECTORS = (
+    '.TUXModal-overlay [aria-label*="lose" i]',
+    '.TUXModal-overlay [data-e2e="modal-close-inner-button"]',
+    '.TUXModal-overlay button:has-text("Not now")',
+    '.TUXModal-overlay button:has-text("Cancel")',
 )
 
 
@@ -65,14 +74,32 @@ def _first_visible(page, selectors, timeout=5000):
     return None
 
 
+def dismiss_overlays(page, attempts: int = 5):
+    """关闭 TikTok 的推广/通知弹层(.TUXModal-overlay)，否则它们会吃掉后续点击。"""
+    for _ in range(attempts):
+        if not page.locator(OVERLAY_SELECTOR).count():
+            return
+        close = page.locator(", ".join(OVERLAY_CLOSE_SELECTORS)).first
+        try:
+            if close.count():
+                close.click(timeout=3000)
+            else:
+                page.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            page.keyboard.press("Escape")
+        _sleep(1000)
+
+
 def _find_message_button(page):
+    btn = _first_visible(page, MESSAGE_BTN_DATA, 4000)
+    if btn:
+        return btn
     try:
         by_text = page.get_by_role("button", name=re.compile("message", re.I)).first
-        by_text.wait_for(state="visible", timeout=4000)
+        by_text.wait_for(state="visible", timeout=2000)
         return by_text
     except Exception:  # noqa: BLE001
-        pass
-    return _first_visible(page, MESSAGE_BTN_DATA, 4000)
+        return None
 
 
 def _type_humanlike(page, text: str):
@@ -168,16 +195,23 @@ def _shot(page, dirpath: Path, tag: str) -> str:
 
 def _send_via_profile(page, user: str, text: str, shots_dir: Path, save_ok_shot: bool) -> dict:
     page.goto(f"https://www.tiktok.com/@{user}?lang=en", wait_until="domcontentloaded", timeout=60000)
-    _sleep(3000)
+    _sleep(random.uniform(2500, 4500))
     if _is_login(page):
         raise LoginExpiredError()
+    dismiss_overlays(page)
 
     btn = _find_message_button(page)
     if not btn:
         path = _shot(page, shots_dir, f"{user}_no_msg_btn")
-        return {"ok": False, "reason": "未找到 Message 按钮（对方可能未开启私信）", "shot": path}
-    btn.click()
-    _sleep(2500)
+        return {"ok": False, "reason": "未找到 Message 按钮（对方可能未开启私信/非互关）", "shot": path}
+    # 弹层可能把点击吞掉：先点一次，失败则关弹层重试
+    try:
+        btn.click(timeout=10000)
+    except Exception:  # noqa: BLE001
+        dismiss_overlays(page)
+        btn.click(timeout=10000)
+    _sleep(random.uniform(2000, 4000))
+    dismiss_overlays(page)
 
     if not _fill_editor(page, text):
         path = _shot(page, shots_dir, f"{user}_no_editor")
@@ -220,10 +254,11 @@ class StreakSender:
             browser_cls = p.chromium if self.cfg["run"].get("browser", "chromium") == "chromium" else p.firefox
             browser = browser_cls.launch(headless=self.cfg["run"]["headless"], args=self._launch_args())
             context = browser.new_context(
-                viewport={"width": 1280, "height": 900},
-                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+                viewport={"width": 1440, "height": 900},
+                user_agent=("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
                 locale=self.cfg["run"].get("locale", "en-US"),
+                timezone_id="UTC",
             )
             if cookies:
                 context.add_cookies(cookies)
@@ -231,7 +266,8 @@ class StreakSender:
             try:
                 # 登录态检查
                 page.goto("https://www.tiktok.com/?lang=en", wait_until="domcontentloaded", timeout=60000)
-                _sleep(2500)
+                _sleep(random.uniform(2500, 4000))
+                dismiss_overlays(page)
                 if _is_login(page):
                     raise LoginExpiredError()
 
@@ -310,6 +346,7 @@ class StreakSender:
         _sleep(3500)
         if _is_login(page):
             raise LoginExpiredError()
+        dismiss_overlays(page)
         # 在会话列表中按用户名文本定位（会话项通常含可读名称）
         item = page.get_by_text(re.compile(re.escape(user), re.I)).first
         try:
