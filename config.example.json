@@ -1,0 +1,28 @@
+{
+  "run": {
+    "headless": true,
+    "dryRun": false,
+    "browser": "chromium",
+    "locale": "en-US",
+    "minDelayMs": 6000,
+    "maxDelayMs": 18000,
+    "startDelayMs": 8000,
+    "maxDailySends": 50,
+    "abortAfterFails": 3,
+    "cooldownAfterFailMs": 20000,
+    "shotsDir": "shots",
+    "saveShotPerSend": false
+  },
+  "sendStrategy": "profile",
+  "templates": [
+    "今天也要一起继续火花哦 {username} 🔥",
+    "来续火花啦，{date} {time} 打卡 📸"
+  ],
+  "recipients": [
+    "friend_username_1",
+    "friend_username_2"
+  ],
+  "telegram": {
+    "enabled": true
+  }
+}

@@ -1,0 +1,55 @@
+name: TikTok 续火花
+
+# trigger：
+#  - schedule: 每日定时（GitHub Actions 按 UTC 时区执行）
+#    * 北京时间换算：北京 18:00 = UTC 10:00。
+#    * cron 语法：分钟 小时 日 月 星期
+#  - workflow_dispatch: 手动触发
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 防止上次未跑完时并发重复触发
+concurrency:
+  group: tiktok-streak
+  cancel-in-progress: false
+
+jobs:
+  streak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # 登录 Cookie（JSON 数组字符串）
+      TIKTOK_COOKIES: ${{ secrets.TIKTOK_COOKIES }}
+      # Telegram 机器人提醒（未配置则自动跳过推送）
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 安装 Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: 执行续火花任务
+        run: python main.py
+
+      - name: 上传失败截图（调试用）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: streak-shots-${{ github.run_id }}
+          path: shots/
+          retention-days: 7
