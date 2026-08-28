@@ -1,0 +1,27 @@
+{
+  "run": {
+    "headless": true,
+    "dryRun": false,
+    "browser": "chromium",
+    "locale": "en-US",
+    "minDelayMs": 6000,
+    "maxDelayMs": 18000,
+    "startDelayMs": 8000,
+    "maxDailySends": 50,
+    "abortAfterFails": 3,
+    "cooldownAfterFailMs": 20000,
+    "shotsDir": "shots",
+    "saveShotPerSend": false
+  },
+  "sendStrategy": "profile",
+  "templates": [
+    "Давайте оставимся такими же 🔥"    
+  ],
+  "recipients": [
+    "mo_jijy",
+    "misery1826"
+  ],
+  "telegram": {
+    "enabled": true
+  }
+}
