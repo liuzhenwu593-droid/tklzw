@@ -41,6 +41,9 @@ SEND_SELECTORS = (
 
 # TikTok 会弹出应用推广/通知弹层(.TUXModal-overlay)吞掉点击，需先关闭
 OVERLAY_SELECTOR = '.TUXModal-overlay'
+
+# cookie 失效时，点 Message 按钮不会打开聊天，只会弹出登录框
+LOGIN_MODAL_SELECTOR = '[data-e2e="login-modal"]'
 OVERLAY_CLOSE_SELECTORS = (
     '.TUXModal-overlay [aria-label*="lose" i]',
     '.TUXModal-overlay [data-e2e="modal-close-inner-button"]',
@@ -82,6 +85,15 @@ def _first_visible(page, selectors, timeout=5000):
         except Exception:  # noqa: BLE001
             continue
     return None
+
+
+def _login_modal_visible(page) -> bool:
+    """点 Message 后若弹出登录框，说明会话 Cookie 已失效。"""
+    try:
+        loc = page.locator(LOGIN_MODAL_SELECTOR).first
+        return loc.count() > 0 and loc.is_visible()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _iter_search_roots(page):
@@ -295,6 +307,11 @@ def _send_via_profile(page, user: str, text: str, shots_dir: Path, save_ok_shot:
     # 时才关遮罩——改版后聊天面板本身可能是 TUXModal 弹窗，
     # 无脑 Escape 会把刚打开的面板直接关掉（表现为面板从未打开）。
     editor = _find_editor_anywhere(page, timeout=5000)
+    # 会话失效兜底：cookie 过期时点 Message 只会弹出登录框（不是聊天面板），
+    # 此时必须直接报错走人，不能当成“找不到输入框”静默失败。注意检查要放在
+    # dismiss_overlays 之前——登录框本身也可能被当成遮罩关掉。
+    if _login_modal_visible(page):
+        raise LoginExpiredError("点击 Message 后弹出登录框：TikTok 会话 Cookie 已失效，请重新导出并更新 TIKTOK_COOKIES")
     if not editor and page.locator(OVERLAY_SELECTOR).count():
         dismiss_overlays(page)
 
