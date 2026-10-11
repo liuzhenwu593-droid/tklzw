@@ -18,10 +18,20 @@ MESSAGE_BTN_DATA = (
     'a[href*="/messages"]',
 )
 EDITOR_SELECTORS = (
+    # 旧版 TikTok data-e2e（保留：A/B 测试或区域版本可能仍在用）
     '[data-e2e="message-input-area"] [contenteditable="true"]',
     '[data-e2e="chat-input"] [contenteditable="true"]',
-    'div[contenteditable="true"]',
     'textarea[data-e2e="chat-input"]',
+    # 部分匹配：TikTok 改名（如 chat-input-v2 / dm-chat-input）时仍能命中
+    '[data-e2e*="chat-input" i] [contenteditable="true"]',
+    '[data-e2e*="message-input" i] [contenteditable="true"]',
+    '[data-e2e*="composer" i] [contenteditable="true"]',
+    '[data-e2e*="dm-input" i] [contenteditable="true"]',
+    # 与 TikTok 私有属性无关的兜底（改版后首选命中项）
+    '[contenteditable="true"]',
+    '[role="textbox"]',
+    'div[contenteditable="true"]',
+    'textarea',
 )
 SEND_SELECTORS = (
     '[data-e2e="message-send"]',
@@ -74,6 +84,50 @@ def _first_visible(page, selectors, timeout=5000):
     return None
 
 
+def _find_editor(page, timeout=12000):
+    """找聊天输入框：轮询主页面 + 所有 iframe，容忍聊天面板异步打开。
+
+    TikTok 改版后输入框的 data-e2e 会变，这里按 EDITOR_SELECTORS
+    逐个试，保证“页面上真实可见的输入框”优先于属性名。
+    """
+    deadline = time.time() + timeout / 1000.0
+    while time.time() < deadline:
+        for frame in page.frames:
+            for sel in EDITOR_SELECTORS:
+                try:
+                    loc = frame.locator(sel).first
+                    if loc.count() and loc.is_visible():
+                        return loc
+                except Exception:  # noqa: BLE001
+                    continue
+        _sleep(500)
+    return None
+
+
+def _dom_hint(page) -> str:
+    """一句话 DOM 摘要，进 Telegram 报告，方便下次改版时直接定位新选择器。"""
+    try:
+        ce = page.locator("[contenteditable]").count()
+        tb = page.locator('[role="textbox"]').count()
+        ta = page.locator("textarea").count()
+        ifr = max(0, len(page.frames) - 1)
+        url = page.url[:90]
+        return f"contenteditable={ce},textbox={tb},textarea={ta},iframe={ifr},url={url}"
+    except Exception:  # noqa: BLE001
+        return "dom探测失败"
+
+
+def _dump_html(page, dirpath: Path, tag: str) -> str:
+    """保存整页 DOM，改版导致选择器失效时可从中找出新属性名。"""
+    dirpath.mkdir(parents=True, exist_ok=True)
+    name = f"dom_{tag}_{_now_tag()}.html"
+    try:
+        (dirpath / name).write_text(page.content(), encoding="utf-8")
+        return str(dirpath / name)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def dismiss_overlays(page, attempts: int = 5):
     """关闭 TikTok 的推广/通知弹层(.TUXModal-overlay)，否则它们会吃掉后续点击。"""
     for _ in range(attempts):
@@ -117,7 +171,7 @@ def _type_humanlike(page, text: str):
 
 
 def _fill_editor(page, text: str) -> bool:
-    editor = _first_visible(page, EDITOR_SELECTORS, 4000)
+    editor = _find_editor(page)
     if not editor:
         return False
     try:
@@ -132,11 +186,14 @@ def _fill_editor(page, text: str) -> bool:
 
 def _editor_empty(page) -> bool | None:
     """发送后检查输入框是否清空。返回 None 表示无法判定。"""
-    ed = _first_visible(page, EDITOR_SELECTORS, 1500)
+    ed = _find_editor(page, timeout=1500)
     if not ed:
         return None
     try:
-        return (ed.inner_text() or "").strip() == ""
+        text = (ed.inner_text() or "")
+        # TikTok 富文本编辑器清空后可能残留零宽字符，strip 掉再判空
+        text = text.strip().strip("\u200b\u200c\u200d\ufeff")
+        return text == ""
     except Exception:  # noqa: BLE001
         return None
 
@@ -215,7 +272,9 @@ def _send_via_profile(page, user: str, text: str, shots_dir: Path, save_ok_shot:
 
     if not _fill_editor(page, text):
         path = _shot(page, shots_dir, f"{user}_no_editor")
-        return {"ok": False, "reason": "未找到消息输入框", "shot": path}
+        _dump_html(page, shots_dir, f"{user}_no_editor")
+        hint = _dom_hint(page)
+        return {"ok": False, "reason": f"未找到消息输入框（{hint}；截图+DOM已保存）", "shot": path}
 
     sent = _submit(page)
     if not sent:
@@ -358,7 +417,9 @@ class StreakSender:
         _sleep(2000)
         if not _fill_editor(page, text):
             path = _shot(page, self.shots_dir, f"{user}_no_editor")
-            return {"ok": False, "reason": "未找到消息输入框", "shot": path}
+            _dump_html(page, self.shots_dir, f"{user}_no_editor")
+            hint = _dom_hint(page)
+            return {"ok": False, "reason": f"未找到消息输入框（{hint}；截图+DOM已保存）", "shot": path}
         if not _submit(page):
             path = _shot(page, self.shots_dir, f"{user}_send_fail")
             return {"ok": False, "reason": "未能触发发送", "shot": path}
