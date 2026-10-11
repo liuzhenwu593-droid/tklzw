@@ -45,10 +45,13 @@ jobs:
       - name: 执行续火花任务
         run: python main.py
 
-      - name: 上传失败截图（调试用）
-        if: failure()
+      - name: 上传运行截图与 DOM（调试用）
+        # 单个收件人失败时脚本返回 exit 0（job 保持绿色），若只在 failure() 上传，
+        # 恰恰最需要排查的那次运行的截图/DOM 会被丢掉。改成 always() 常传。
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: streak-shots-${{ github.run_id }}
           path: shots/
+          if-no-files-found: warn
           retention-days: 7

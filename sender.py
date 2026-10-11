@@ -84,22 +84,34 @@ def _first_visible(page, selectors, timeout=5000):
     return None
 
 
-def _find_editor(page, timeout=12000):
-    """找聊天输入框：轮询主页面 + 所有 iframe，容忍聊天面板异步打开。
+def _iter_search_roots(page):
+    """聊天面板可能开在弹窗/新标签页：把同 context 下所有未关闭页面都纳入搜索。"""
+    yield page
+    try:
+        for p in page.context.pages:
+            if p is not page and not p.is_closed():
+                yield p
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _find_editor_anywhere(page, timeout=12000):
+    """找聊天输入框：轮询所有页面（含弹窗/新标签页）的主页面 + 所有 iframe，容忍聊天面板异步打开。
 
     TikTok 改版后输入框的 data-e2e 会变，这里按 EDITOR_SELECTORS
     逐个试，保证“页面上真实可见的输入框”优先于属性名。
     """
     deadline = time.time() + timeout / 1000.0
     while time.time() < deadline:
-        for frame in page.frames:
-            for sel in EDITOR_SELECTORS:
-                try:
-                    loc = frame.locator(sel).first
-                    if loc.count() and loc.is_visible():
-                        return loc
-                except Exception:  # noqa: BLE001
-                    continue
+        for root in _iter_search_roots(page):
+            for frame in root.frames:
+                for sel in EDITOR_SELECTORS:
+                    try:
+                        loc = frame.locator(sel).first
+                        if loc.count() and loc.is_visible():
+                            return loc
+                    except Exception:  # noqa: BLE001
+                        continue
         _sleep(500)
     return None
 
@@ -111,8 +123,12 @@ def _dom_hint(page) -> str:
         tb = page.locator('[role="textbox"]').count()
         ta = page.locator("textarea").count()
         ifr = max(0, len(page.frames) - 1)
+        try:
+            pages = sum(1 for p in page.context.pages if not p.is_closed())
+        except Exception:  # noqa: BLE001
+            pages = 1
         url = page.url[:90]
-        return f"contenteditable={ce},textbox={tb},textarea={ta},iframe={ifr},url={url}"
+        return f"contenteditable={ce},textbox={tb},textarea={ta},iframe={ifr},pages={pages},url={url}"
     except Exception:  # noqa: BLE001
         return "dom探测失败"
 
@@ -170,23 +186,25 @@ def _type_humanlike(page, text: str):
         page.keyboard.type(" " if ch == "\n" else ch, delay=delay)
 
 
-def _fill_editor(page, text: str) -> bool:
-    editor = _find_editor(page)
+def _fill_editor(page, text: str):
+    """找到编辑器并输入文本。返回命中的 editor locator（其 .page 供后续
+    在同一页面提交/校验），找不到返回 None。"""
+    editor = _find_editor_anywhere(page)
     if not editor:
-        return False
+        return None
     try:
         editor.click()
         _sleep(300)
     except Exception:  # noqa: BLE001
         pass
-    _type_humanlike(page, text)
+    _type_humanlike(editor.page, text)
     _sleep(350 + random.random() * 300)
-    return True
+    return editor
 
 
 def _editor_empty(page) -> bool | None:
     """发送后检查输入框是否清空。返回 None 表示无法判定。"""
-    ed = _find_editor(page, timeout=1500)
+    ed = _find_editor_anywhere(page, timeout=1500)
     if not ed:
         return None
     try:
@@ -199,13 +217,18 @@ def _editor_empty(page) -> bool | None:
 
 
 def _message_in_flow(page, text: str) -> bool:
-    """尽力在消息流中确认该条消息真的发出去了。"""
+    """尽力在消息流中确认该条消息真的发出去了（所有页面都查，防弹窗聊天）。"""
     fragment = text.strip()[:30]
     if not fragment:
         return False
     try:
-        page.get_by_text(fragment, exact=False).first.wait_for(state="visible", timeout=3500)
-        return True
+        for root in _iter_search_roots(page):
+            try:
+                root.get_by_text(fragment, exact=False).first.wait_for(state="visible", timeout=3500)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
     except Exception:  # noqa: BLE001
         return False
 
@@ -267,22 +290,29 @@ def _send_via_profile(page, user: str, text: str, shots_dir: Path, save_ok_shot:
     except Exception:  # noqa: BLE001
         dismiss_overlays(page)
         btn.click(timeout=10000)
-    _sleep(random.uniform(2000, 4000))
-    dismiss_overlays(page)
 
-    if not _fill_editor(page, text):
+    # 点完先给聊天面板几秒自然打开；只有“没出现编辑器且确实有遮罩”
+    # 时才关遮罩——改版后聊天面板本身可能是 TUXModal 弹窗，
+    # 无脑 Escape 会把刚打开的面板直接关掉（表现为面板从未打开）。
+    editor = _find_editor_anywhere(page, timeout=5000)
+    if not editor and page.locator(OVERLAY_SELECTOR).count():
+        dismiss_overlays(page)
+
+    editor = _fill_editor(page, text)
+    if not editor:
         path = _shot(page, shots_dir, f"{user}_no_editor")
         _dump_html(page, shots_dir, f"{user}_no_editor")
         hint = _dom_hint(page)
         return {"ok": False, "reason": f"未找到消息输入框（{hint}；截图+DOM已保存）", "shot": path}
+    chat_page = editor.page
 
-    sent = _submit(page)
+    sent = _submit(chat_page)
     if not sent:
         path = _shot(page, shots_dir, f"{user}_send_fail")
         return {"ok": False, "reason": "未能触发发送", "shot": path}
 
     # 发送校验：输入框清空 + 消息出现在消息流
-    verified, detail = _verify_send(page, text)
+    verified, detail = _verify_send(chat_page, text)
     if not verified:
         path = _shot(page, shots_dir, f"{user}_verify_fail")
         return {"ok": False, "reason": detail, "shot": path}
@@ -415,15 +445,17 @@ class StreakSender:
             path = _shot(page, self.shots_dir, f"{user}_no_convo")
             return {"ok": False, "reason": "消息列表中未找到该用户的会话", "shot": path}
         _sleep(2000)
-        if not _fill_editor(page, text):
+        editor = _fill_editor(page, text)
+        if not editor:
             path = _shot(page, self.shots_dir, f"{user}_no_editor")
             _dump_html(page, self.shots_dir, f"{user}_no_editor")
             hint = _dom_hint(page)
             return {"ok": False, "reason": f"未找到消息输入框（{hint}；截图+DOM已保存）", "shot": path}
-        if not _submit(page):
+        chat_page = editor.page
+        if not _submit(chat_page):
             path = _shot(page, self.shots_dir, f"{user}_send_fail")
             return {"ok": False, "reason": "未能触发发送", "shot": path}
-        verified, detail = _verify_send(page, text)
+        verified, detail = _verify_send(chat_page, text)
         if not verified:
             path = _shot(page, self.shots_dir, f"{user}_verify_fail")
             return {"ok": False, "reason": detail, "shot": path}
